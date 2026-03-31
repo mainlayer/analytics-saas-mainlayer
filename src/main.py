@@ -130,7 +130,7 @@ async def require_active_subscription(
     response_model=EventResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["Events"],
-    summary="Record an analytics event ($0.00001/event)",
+    summary="Record an analytics event",
     responses={402: {"model": ErrorResponse, "description": "Payment required"}},
 )
 async def track_event(
@@ -138,39 +138,69 @@ async def track_event(
     request: Request,
     x_mainlayer_token: str = Header(default=""),
 ) -> EventResponse:
-    """Ingest a single analytics event.
+    """Ingest a single analytics event for a site.
 
-    The `x-mainlayer-token` header must carry a valid Mainlayer payment token.
-    Events are stored server-side; the visitor IP is one-way hashed for privacy.
+    Requires:
+    - Valid Mainlayer payment token via X-Mainlayer-Token header
+    - Active subscription for the site
+    - Valid site_id that has been registered
+
+    Events are stored with privacy protections:
+    - Visitor IP is one-way hashed (SHA-256)
+    - No PII is stored
+    - Data is retained according to your plan
     """
     if not x_mainlayer_token:
+        logger.warning("Event rejected: missing payment token for site %s", payload.site_id)
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail={"error": "payment_required", "info": "mainlayer.fr"},
+            detail={
+                "error": "payment_required",
+                "message": "X-Mainlayer-Token header required",
+                "info": "mainlayer.fr",
+            },
         )
 
-    event_id = str(uuid.uuid4())
-    client_ip = request.client.host if request.client else None
-    props_str = json.dumps(payload.props) if payload.props else None
+    # Validate site exists
+    if not get_site(payload.site_id):
+        logger.warning("Event rejected: unknown site %s", payload.site_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "site_not_found",
+                "message": f"Site {payload.site_id} not found",
+            },
+        )
 
-    record_event(
-        event_id=event_id,
-        site_id=payload.site_id,
-        name=payload.name,
-        url=payload.url,
-        referrer=payload.referrer,
-        ip=client_ip,
-        props=props_str,
-    )
+    try:
+        event_id = str(uuid.uuid4())
+        client_ip = request.client.host if request.client else None
+        props_str = json.dumps(payload.props) if payload.props else None
 
-    logger.info("Event recorded: site=%s name=%s", payload.site_id, payload.name)
-    return EventResponse(
-        id=event_id,
-        site_id=payload.site_id,
-        name=payload.name,
-        url=payload.url,
-        timestamp=datetime.utcnow(),
-    )
+        record_event(
+            event_id=event_id,
+            site_id=payload.site_id,
+            name=payload.name,
+            url=payload.url,
+            referrer=payload.referrer,
+            ip=client_ip,
+            props=props_str,
+        )
+
+        logger.info("Event recorded: site=%s name=%s ip=%s", payload.site_id, payload.name, client_ip)
+        return EventResponse(
+            id=event_id,
+            site_id=payload.site_id,
+            name=payload.name,
+            url=payload.url,
+            timestamp=datetime.utcnow(),
+        )
+    except Exception as e:
+        logger.error("Failed to record event for site %s: %s", payload.site_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "internal_server_error", "message": str(e)},
+        )
 
 
 @app.get(
@@ -234,13 +264,24 @@ async def get_realtime(
     response_model=SiteResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["Sites"],
-    summary="Register a new site",
+    summary="Register a new site for analytics",
 )
 async def create_site(body: SiteRegistration) -> SiteResponse:
     """Register a new site for analytics tracking.
 
     Returns a `site_id` that must be passed in all subsequent tracking calls.
+
+    After registering, call POST /subscribe to activate a subscription plan
+    and enable dashboard access.
     """
+    # Validate domain format
+    if not body.domain or not isinstance(body.domain, str):
+        raise HTTPException(status_code=400, detail="domain is required")
+
+    # Validate email format
+    if body.owner_email and "@" not in body.owner_email:
+        raise HTTPException(status_code=400, detail="invalid email format")
+
     site_id = str(uuid.uuid4())[:8]
     try:
         site = register_site(
@@ -250,9 +291,10 @@ async def create_site(body: SiteRegistration) -> SiteResponse:
             owner_email=body.owner_email,
         )
     except ValueError as exc:
+        logger.warning("Site registration failed: %s", exc)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
-    logger.info("Site registered: %s (%s)", site_id, body.domain)
+    logger.info("Site registered: %s (%s) owner=%s", site_id, body.domain, body.owner_email)
     return SiteResponse(**site)
 
 
@@ -312,9 +354,27 @@ async def get_subscription_status(site_id: str) -> SubscriptionStatus:
     )
 
 
-@app.get("/health", tags=["Info"], include_in_schema=False)
+@app.get("/health", tags=["Info"])
 async def health() -> dict:
-    return {"status": "ok", "service": "analytics-saas"}
+    """Health check endpoint (unauthenticated)."""
+    from backend.analytics_db import get_db
+    try:
+        with get_db() as conn:
+            conn.execute("SELECT 1")
+        return {
+            "status": "ok",
+            "service": "analytics-saas",
+            "database": "connected",
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error("Health check failed: %s", e)
+        return {
+            "status": "error",
+            "service": "analytics-saas",
+            "database": "disconnected",
+            "error": str(e),
+        }
 
 
 # ---------------------------------------------------------------------------
