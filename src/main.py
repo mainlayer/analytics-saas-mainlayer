@@ -70,7 +70,7 @@ app = FastAPI(
         "Track events, view dashboards, and manage per-site subscriptions."
     ),
     version="1.0.0",
-    contact={"name": "Mainlayer", "url": "https://mainlayer.xyz"},
+    contact={"name": "Mainlayer", "url": "https://mainlayer.fr"},
     license_info={"name": "MIT"},
 )
 

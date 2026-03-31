@@ -2,7 +2,7 @@
 Mainlayer billing integration.
 
 Mainlayer is the API-native billing layer for SaaS products.
-Base URL: https://api.mainlayer.xyz
+Base URL: https://api.mainlayer.fr
 Auth: Bearer <api_key>
 """
 
@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-MAINLAYER_BASE_URL = "https://api.mainlayer.xyz"
+MAINLAYER_BASE_URL = "https://api.mainlayer.fr"
 
 PLAN_PRICES = {
     "pro": 29.00,
